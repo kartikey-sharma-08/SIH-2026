@@ -65,6 +65,10 @@ class InfographicSection(BaseModel):
 class InfographicSpec(BaseModel):
     title: str = Field(description="Main headline for the infographic.")
     subtitle: str = Field(description="Short supporting line under the headline.")
+    layout_style: str = Field(
+        default="executive_dashboard",
+        description="Choose one of: executive_dashboard, timeline, comparison, problem_solution, kpi_scorecard.",
+    )
     accent_color: str = Field(default="#2563eb", description="HEX accent color for the infographic.")
     background_color: str = Field(default="#f8fafc", description="HEX background color.")
     sections: List[InfographicSection] = Field(description="Blocks to render on the infographic.")
@@ -128,8 +132,54 @@ def _load_font(font_name: str, size: int) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def _fallback_infographic_spec(document_text: str) -> InfographicSpec:
+    """Create a deterministic infographic when the external AI service is unavailable."""
+    cleaned = " ".join(document_text.split())
+    sentences = [s.strip() for s in cleaned.split(".") if s.strip()]
+    title = "Strategic Overview"
+    subtitle = "Operational summary generated from the provided source material"
+    if sentences:
+        title = sentences[0][:72].strip() or title
+        subtitle = "Key insights extracted from the source content"
+
+    lower_doc = cleaned.lower()
+    if any(word in lower_doc for word in ["timeline", "roadmap", "phase", "launch", "sequence", "milestone"]):
+        layout_style = "timeline"
+    elif any(word in lower_doc for word in ["compare", "comparison", "versus", "option", "alternative"]):
+        layout_style = "comparison"
+    elif any(word in lower_doc for word in ["problem", "challenge", "risk", "issue", "barrier"]):
+        layout_style = "problem_solution"
+    elif any(word in lower_doc for word in ["kpi", "metric", "performance", "impact", "outcome", "result"]):
+        layout_style = "kpi_scorecard"
+    else:
+        layout_style = "executive_dashboard"
+
+    section_texts = [
+        "The source document highlights the main operational challenge, strategic context, and the urgency behind the issue.",
+        "The central insight is that the organization needs a more structured and measurable pathway to improve execution and decision quality.",
+        "The likely impact includes slower delivery, uneven adoption, and reduced confidence across teams and stakeholders.",
+        "The recommended response is to align priorities, clarify ownership, and focus on the most actionable next steps.",
+        "Expected value includes stronger visibility, better coordination, and more confident outcomes across the organization.",
+    ]
+    section_titles = ["Context", "Key Insight", "Impact", "Recommendation", "Outcome"]
+
+    sections = [
+        InfographicSection(title=section_titles[i], text=section_texts[i])
+        for i in range(len(section_titles))
+    ]
+
+    return InfographicSpec(
+        title=title[:34],
+        subtitle=subtitle,
+        layout_style=layout_style,
+        accent_color="#2563eb",
+        background_color="#f8fafc",
+        sections=sections,
+    )
+
+
 def render_infographic(spec: InfographicSpec) -> bytes:
-    """Render an infographic as a PNG image using Pillow."""
+    """Render an infographic as a PNG image using a layout chosen by the model."""
     width, height = 1400, 900
     image = Image.new("RGB", (width, height), color=spec.background_color)
     draw = ImageDraw.Draw(image)
@@ -140,39 +190,89 @@ def render_infographic(spec: InfographicSpec) -> bytes:
     section_title_font = _load_font("DejaVuSans-Bold.ttf", 24)
     body_font = _load_font("DejaVuSans.ttf", 20)
 
-    # Header strip
     draw.rounded_rectangle((60, 50, 1340, 180), radius=26, fill=accent)
     draw.text((90, 78), spec.title[:34], fill="white", font=title_font)
     draw.text((90, 130), spec.subtitle, fill=(255, 255, 255, 200), font=subtitle_font)
 
-    # Content boxes
-    box_x = 80
-    box_y = 220
-    box_w = 1180
-    box_h = 620
-    card_w = (box_w - 80) // 3
-    card_h = box_h - 30
+    layout = (spec.layout_style or "executive_dashboard").strip().lower().replace(" ", "_")
+    sections = spec.sections[:5]
 
-    for idx, section in enumerate(spec.sections[:3]):
-        x0 = box_x + idx * (card_w + 30)
-        y0 = box_y
-        x1 = x0 + card_w
-        y1 = y0 + card_h
-        draw.rounded_rectangle((x0, y0, x1, y1), radius=22, fill=(255, 255, 255, 220))
-        draw.rounded_rectangle((x0 + 18, y0 + 18, x0 + 40, y0 + 40), radius=8, fill=accent)
-        draw.text((x0 + 58, y0 + 18), section.title, fill="black", font=section_title_font)
-
-        lines = _wrap_text(draw, body_font, section.text, max_width=card_w - 60)
-        line_height = int(body_font.getbbox("Ag")[3]) + 8
-        current_y = y0 + 80
-        for line in lines[:11]:
-            if line == "":
+    if layout == "timeline":
+        for idx, section in enumerate(sections):
+            y = 220 + idx * 125
+            circle_x = 150
+            line_x = 150
+            draw.line((line_x, 220, line_x, 720), fill=accent, width=4)
+            draw.ellipse((circle_x - 16, y - 12, circle_x + 16, y + 12), fill=accent)
+            draw.rounded_rectangle((190, y - 24, 1260, y + 76), radius=16, fill=(255, 255, 255, 220))
+            draw.text((220, y - 6), section.title, fill="black", font=section_title_font)
+            wrapped = _wrap_text(draw, body_font, section.text, max_width=980)
+            current_y = y + 28
+            for line in wrapped[:2]:
+                draw.text((220, current_y), line, fill=(30, 41, 59), font=body_font)
+                current_y += int(body_font.getbbox("Ag")[3]) + 6
+    elif layout == "comparison":
+        left = sections[0] if sections else InfographicSection(title="Context", text="")
+        right = sections[1] if len(sections) > 1 else InfographicSection(title="Impact", text="")
+        left_box = (90, 230, 650, 760)
+        right_box = (750, 230, 1310, 760)
+        for box in (left_box, right_box):
+            draw.rounded_rectangle(box, radius=22, fill=(255, 255, 255, 220))
+        draw.text((120, 260), left.title, fill="black", font=section_title_font)
+        draw.text((780, 260), right.title, fill="black", font=section_title_font)
+        for idx, text in enumerate(_wrap_text(draw, body_font, left.text, max_width=500)[:7]):
+            draw.text((120, 310 + idx * 42), text, fill=(30, 41, 59), font=body_font)
+        for idx, text in enumerate(_wrap_text(draw, body_font, right.text, max_width=500)[:7]):
+            draw.text((780, 310 + idx * 42), text, fill=(30, 41, 59), font=body_font)
+    elif layout == "problem_solution":
+        problem = sections[0] if sections else InfographicSection(title="Problem", text="")
+        solution = sections[1] if len(sections) > 1 else InfographicSection(title="Action", text="")
+        draw.rounded_rectangle((90, 230, 660, 760), radius=22, fill=(255, 255, 255, 220))
+        draw.rounded_rectangle((760, 230, 1310, 760), radius=22, fill=accent)
+        draw.text((120, 260), problem.title, fill="black", font=section_title_font)
+        draw.text((790, 260), solution.title, fill="white", font=section_title_font)
+        for idx, text in enumerate(_wrap_text(draw, body_font, problem.text, max_width=500)[:8]):
+            draw.text((120, 310 + idx * 42), text, fill=(30, 41, 59), font=body_font)
+        for idx, text in enumerate(_wrap_text(draw, body_font, solution.text, max_width=450)[:8]):
+            draw.text((790, 310 + idx * 42), text, fill="white", font=body_font)
+    elif layout == "kpi_scorecard":
+        cols = 2
+        rows = 2
+        for idx, section in enumerate(sections[:4]):
+            col = idx % cols
+            row = idx // cols
+            x0 = 120 + col * 600
+            y0 = 240 + row * 220
+            draw.rounded_rectangle((x0, y0, x0 + 510, y0 + 170), radius=18, fill=(255, 255, 255, 220))
+            draw.rounded_rectangle((x0 + 18, y0 + 20, x0 + 46, y0 + 48), radius=8, fill=accent)
+            draw.text((x0 + 60, y0 + 18), section.title, fill="black", font=section_title_font)
+            for jdx, text in enumerate(_wrap_text(draw, body_font, section.text, max_width=440)[:4]):
+                draw.text((x0 + 28, y0 + 68 + jdx * 28), text, fill=(30, 41, 59), font=body_font)
+    else:
+        box_x = 80
+        box_y = 220
+        box_w = 1180
+        box_h = 620
+        card_w = (box_w - 80) // 3
+        card_h = box_h - 30
+        for idx, section in enumerate(sections[:3]):
+            x0 = box_x + idx * (card_w + 30)
+            y0 = box_y
+            x1 = x0 + card_w
+            y1 = y0 + card_h
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=22, fill=(255, 255, 255, 220))
+            draw.rounded_rectangle((x0 + 18, y0 + 18, x0 + 40, y0 + 40), radius=8, fill=accent)
+            draw.text((x0 + 58, y0 + 18), section.title, fill="black", font=section_title_font)
+            lines = _wrap_text(draw, body_font, section.text, max_width=card_w - 60)
+            line_height = int(body_font.getbbox("Ag")[3]) + 8
+            current_y = y0 + 80
+            for line in lines[:11]:
+                if line == "":
+                    current_y += line_height
+                    continue
+                draw.text((x0 + 24, current_y), line, fill=(30, 41, 59), font=body_font)
                 current_y += line_height
-                continue
-            draw.text((x0 + 24, current_y), line, fill=(30, 41, 59), font=body_font)
-            current_y += line_height
 
-    # Footer note
     draw.text((90, 840), "Generated by TransformAI infographic pipeline", fill=(51, 65, 85), font=subtitle_font)
 
     buffer = io.BytesIO()
@@ -186,7 +286,7 @@ def render_infographic(spec: InfographicSpec) -> bytes:
 # Initialize LLM (Model agnostic - swap with ChatGoogleGenerativeAI or ChatAnthropic seamlessly)
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.6-flash",
-    temperature=0.3,
+    temperature=0.8,
 )
 
 # ------------------------------------------
@@ -260,21 +360,38 @@ PROMPT_TEMPLATES = {
 INFOGRAPHIC_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        "You are a visual communications strategist. Create a concise infographic plan designed for a business/technical audience.\n"
-        "Use only valid JSON and no markdown fences.\n"
-        "Return a JSON object matching this schema:\n"
+        "You are a senior visual strategist and analyst creating executive-ready infographic content for a business and technical audience.\n"
+        "Create a distinct infographic plan based only on the provided summary.\n"
+        "Choose exactly one visual layout_style from this list and make the content fit that format:\n"
+        "- executive_dashboard\n"
+        "- timeline\n"
+        "- comparison\n"
+        "- problem_solution\n"
+        "- kpi_scorecard\n"
+        "Use valid JSON only. No markdown fences, no commentary, no extra text.\n"
+        "Return a JSON object matching this exact schema:\n"
         "{{\n"
-        "  \"title\": \"Short main headline\",\n"
-        "  \"subtitle\": \"Short supporting sentence\",\n"
+        "  \"title\": \"Short but high-impact headline\",\n"
+        "  \"subtitle\": \"Clear supporting sentence explaining the key idea\",\n"
+        "  \"layout_style\": \"executive_dashboard\" | \"timeline\" | \"comparison\" | \"problem_solution\" | \"kpi_scorecard\",\n"
         "  \"accent_color\": \"HEX color like #2563eb\",\n"
         "  \"background_color\": \"HEX color like #f8fafc\",\n"
         "  \"sections\": [\n"
-        "    {{\"title\": \"Key Finding\", \"text\": \"up to 2 sentences\"}},\n"
-        "    {{\"title\": \"Impact\", \"text\": \"up to 2 sentences\"}},\n"
-        "    {{\"title\": \"Action\", \"text\": \"up to 2 sentences\"}}\n"
+        "    {{\"title\": \"Key Context\", \"text\": \"1-2 sentences describing the issue or situation\"}},\n"
+        "    {{\"title\": \"Key Insight\", \"text\": \"1-2 sentences explaining the major finding\"}},\n"
+        "    {{\"title\": \"Impact\", \"text\": \"1-2 sentences describing the business or strategic consequence\"}},\n"
+        "    {{\"title\": \"Recommendation\", \"text\": \"1-2 sentences describing the action to take\"}},\n"
+        "    {{\"title\": \"Outcome\", \"text\": \"1-2 sentences describing expected value or result\"}}\n"
         "  ]\n"
         "}}\n"
-        "Keep the tone clear, executive, and visual.",
+        "Guidelines:\n"
+        "- Make the layout_style genuinely different across outputs when the content supports it.\n"
+        "- Keep the content executive, crisp, fact-driven, and easy to scan.\n"
+        "- Prefer concrete business implications over vague wording.\n"
+        "- For timeline, emphasize sequence or progression; for comparison, contrast options; for problem_solution, show challenge and remedy; for kpi_scorecard, highlight measurable outcomes; for executive_dashboard, emphasize leadership summary.\n"
+        "- Ensure the title is strong and memorable, not generic.\n"
+        "- Keep the JSON schema exactly valid and complete.\n"
+        "- Do not invent numbers, metrics, or facts that are not supported by the summary.\n",
     ),
     ("human", "Core Summary Input:\n{summary}"),
 ])
@@ -364,16 +481,24 @@ async def generate_infographic(
             "format_instructions": json_parser.get_format_instructions(),
         })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed during knowledge extraction phase: {str(e)}")
-
-    try:
-        infographic_chain = INFOGRAPHIC_PROMPT | llm | JsonOutputParser(pydantic_object=InfographicSpec)
-        spec_dict: dict = await infographic_chain.ainvoke({
-            "summary": str(extracted_summary),
-        })
-        infographic_spec = InfographicSpec(**spec_dict)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed during infographic generation: {str(e)}")
+        err_text = str(e)
+        if "429" in err_text or "RESOURCE_EXHAUSTED" in err_text or "quota" in err_text.lower():
+            infographic_spec = _fallback_infographic_spec(document_text)
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed during knowledge extraction phase: {str(e)}")
+    else:
+        try:
+            infographic_chain = INFOGRAPHIC_PROMPT | llm | JsonOutputParser(pydantic_object=InfographicSpec)
+            spec_dict: dict = await infographic_chain.ainvoke({
+                "summary": str(extracted_summary),
+            })
+            infographic_spec = InfographicSpec(**spec_dict)
+        except Exception as e:
+            err_text = str(e)
+            if "429" in err_text or "RESOURCE_EXHAUSTED" in err_text or "quota" in err_text.lower():
+                infographic_spec = _fallback_infographic_spec(document_text)
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed during infographic generation: {str(e)}")
 
     png_bytes = render_infographic(infographic_spec)
     return Response(
