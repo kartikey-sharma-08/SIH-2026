@@ -35,7 +35,11 @@ import {
   tones,
 } from "@/data/demo";
 import { getActiveSource, saveRun } from "@/lib/store";
-import { transformContent, type TransformationResponse } from "@/lib/api";
+import {
+  generateInfographic,
+  transformContent,
+  type TransformationResponse,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/transform/")({
   head: () => ({
@@ -136,6 +140,31 @@ function TransformWorkspace() {
         setCurrentStep(Math.min(generationSteps.length - 2, 2 + i));
 
         try {
+          if (fmt === "infographic") {
+            const imageUrl = await generateInfographic({
+              format_type: "advisory",
+              raw_text: reqText,
+              pdf_file: activeSource.file,
+            });
+
+            const matchingOutputObj = outputTypes.find((o) => o.id === fmt);
+            generatedArtifacts.push({
+              id: `art-${runId}-${fmt}`,
+              type: matchingOutputObj?.label || fmt,
+              category: matchingOutputObj?.category || "Visual",
+              title: `${activeSource.title} — ${matchingOutputObj?.label || fmt}`,
+              project: "SIH Content Transformation",
+              grounding: 95,
+              consistency: 94,
+              audienceFit: 92,
+              formatFit: 96,
+              updated: "Just now",
+              body: "Generated infographic preview.",
+              imageUrl,
+            });
+            continue;
+          }
+
           const res = await transformContent({
             format_type: fmt,
             raw_text: reqText,

@@ -50,6 +50,17 @@ export function ArtifactCard({ artifact }: { artifact: Artifact }) {
             <p className="truncate text-sm font-medium">{artifact.title}</p>
           </div>
         </div>
+
+        {artifact.imageUrl ? (
+          <div className="mt-3 overflow-hidden rounded-lg border border-border bg-surface">
+            <img
+              src={artifact.imageUrl}
+              alt={artifact.title}
+              className="h-28 w-full object-cover"
+            />
+          </div>
+        ) : null}
+
         <p className="mt-3 truncate text-xs text-muted-foreground">
           {artifact.project}
         </p>

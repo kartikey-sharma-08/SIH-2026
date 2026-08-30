@@ -1,11 +1,14 @@
 import io
 import os
+import textwrap
 from enum import Enum
 from typing import List, Optional
 
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
@@ -39,13 +42,6 @@ class OutputFormat(str, Enum):
     LINKEDIN = "linkedin"
     X_THREAD = "x_thread"
     ADVISORY = "advisory"
-    EXEC_SUMMARY = "exec-summary"
-    BRIEFING = "briefing"
-    PRESENTATION = "presentation"
-    INFOGRAPHIC = "infographic"
-    VIDEO_SCRIPT = "video-script"
-    FAQ = "faq"
-    TALKING_POINTS = "talking-points"
 
 
 class CoreSummary(BaseModel):
@@ -59,6 +55,19 @@ class TransformationResponse(BaseModel):
     format_type: OutputFormat
     core_summary: CoreSummary
     transformed_content: str
+
+
+class InfographicSection(BaseModel):
+    title: str = Field(description="Short heading for this infographic block.")
+    text: str = Field(description="Text content to be placed inside this block.")
+
+
+class InfographicSpec(BaseModel):
+    title: str = Field(description="Main headline for the infographic.")
+    subtitle: str = Field(description="Short supporting line under the headline.")
+    accent_color: str = Field(default="#2563eb", description="HEX accent color for the infographic.")
+    background_color: str = Field(default="#f8fafc", description="HEX background color.")
+    sections: List[InfographicSection] = Field(description="Blocks to render on the infographic.")
 
 
 # ==========================================
@@ -79,17 +88,110 @@ def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
         raise HTTPException(status_code=400, detail=f"Failed to process PDF file: {str(e)}")
 
 
+def _wrap_text(draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, text: str, max_width: int) -> List[str]:
+    """Wrap long strings to fit inside an image block."""
+    paragraphs = text.split("\n")
+    wrapped_lines: List[str] = []
+    for paragraph in paragraphs:
+        if not paragraph.strip():
+            wrapped_lines.append("")
+            continue
+        for line in textwrap.wrap(paragraph, width=max(10, int(max_width / max(8, font.getbbox("M")[2])))):
+            wrapped_lines.append(line)
+    return wrapped_lines
+
+
+def _load_font(font_name: str, size: int) -> ImageFont.ImageFont:
+    """Try the requested font, then gracefully fall back to PIL defaults if it is unavailable."""
+    candidates = [
+        font_name,
+        os.path.join(os.getcwd(), "fonts", font_name),
+        os.path.join("C:\\Windows\\Fonts", font_name),
+        os.path.join("C:\\Windows\\Fonts", "arial.ttf"),
+        os.path.join("C:\\Windows\\Fonts", "calibri.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            if os.path.exists(candidate):
+                return ImageFont.truetype(candidate, size)
+        except (OSError, TypeError, ValueError):
+            continue
+
+    try:
+        return ImageFont.truetype(font_name, size)
+    except (OSError, TypeError, ValueError):
+        return ImageFont.load_default()
+
+
+def render_infographic(spec: InfographicSpec) -> bytes:
+    """Render an infographic as a PNG image using Pillow."""
+    width, height = 1400, 900
+    image = Image.new("RGB", (width, height), color=spec.background_color)
+    draw = ImageDraw.Draw(image)
+
+    accent = spec.accent_color
+    title_font = _load_font("DejaVuSans-Bold.ttf", 48)
+    subtitle_font = _load_font("DejaVuSans.ttf", 22)
+    section_title_font = _load_font("DejaVuSans-Bold.ttf", 24)
+    body_font = _load_font("DejaVuSans.ttf", 20)
+
+    # Header strip
+    draw.rounded_rectangle((60, 50, 1340, 180), radius=26, fill=accent)
+    draw.text((90, 78), spec.title[:34], fill="white", font=title_font)
+    draw.text((90, 130), spec.subtitle, fill=(255, 255, 255, 200), font=subtitle_font)
+
+    # Content boxes
+    box_x = 80
+    box_y = 220
+    box_w = 1180
+    box_h = 620
+    card_w = (box_w - 80) // 3
+    card_h = box_h - 30
+
+    for idx, section in enumerate(spec.sections[:3]):
+        x0 = box_x + idx * (card_w + 30)
+        y0 = box_y
+        x1 = x0 + card_w
+        y1 = y0 + card_h
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=22, fill=(255, 255, 255, 220))
+        draw.rounded_rectangle((x0 + 18, y0 + 18, x0 + 40, y0 + 40), radius=8, fill=accent)
+        draw.text((x0 + 58, y0 + 18), section.title, fill="black", font=section_title_font)
+
+        lines = _wrap_text(draw, body_font, section.text, max_width=card_w - 60)
+        line_height = int(body_font.getbbox("Ag")[3]) + 8
+        current_y = y0 + 80
+        for line in lines[:11]:
+            if line == "":
+                current_y += line_height
+                continue
+            draw.text((x0 + 24, current_y), line, fill=(30, 41, 59), font=body_font)
+            current_y += line_height
+
+    # Footer note
+    draw.text((90, 840), "Generated by TransformAI infographic pipeline", fill=(51, 65, 85), font=subtitle_font)
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 # ==========================================
 # 4. LangChain LCEL Pipeline Initialization
 # ==========================================
-def get_llm():
-    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or "PLACEHOLDER_KEY"
-    return ChatGoogleGenerativeAI(
-        model="gemini-3.6-flash",
-        temperature=0.3,
-        google_api_key=api_key,
-    )
+# Initialize LLM (Model agnostic - swap with ChatGoogleGenerativeAI or ChatAnthropic seamlessly)
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.6-flash",
+    temperature=0.3,
+)
 
+# ------------------------------------------
+# Step A: Knowledge Extraction Chain
+# ------------------------------------------
 json_parser = JsonOutputParser(pydantic_object=CoreSummary)
 
 extraction_prompt = ChatPromptTemplate.from_messages([
@@ -100,6 +202,8 @@ extraction_prompt = ChatPromptTemplate.from_messages([
     ),
     ("human", "Source Document Content:\n\n{document_text}"),
 ])
+
+extraction_chain = extraction_prompt | llm | json_parser
 
 
 # ------------------------------------------
@@ -150,108 +254,35 @@ PROMPT_TEMPLATES = {
         ),
         ("human", "Core Summary Input:\n{summary}"),
     ]),
-
-    OutputFormat.EXEC_SUMMARY: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are an Executive Chief of Staff.\n"
-            "Task: Create a concise, 1-page decision-ready Executive Summary.\n\n"
-            "Formatting Rules:\n"
-            "- Sections: **SATELLITE VIEW**, **KEY FINDINGS**, **RISK ANALYSIS**, **RECOMMENDATIONS**, **DECISION REQUIRED**.\n"
-            "- Focus on executive takeaways, business impact, and strategic priority.",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
-
-    OutputFormat.BRIEFING: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are a Senior Policy Advisor.\n"
-            "Task: Create a structured Briefing Note for leadership.\n\n"
-            "Formatting Rules:\n"
-            "- Sections: **PURPOSE**, **BACKGROUND**, **CURRENT POSITION**, **KEY CONSIDERATIONS**, **RECOMMENDED ACTION**.\n"
-            "- Bullet points with bold lead-ins for readability.",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
-
-    OutputFormat.PRESENTATION: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are a Strategy Communications Director.\n"
-            "Task: Outline a 5-slide executive presentation.\n\n"
-            "Formatting Rules:\n"
-            "- Slide 1: Title & Core Thesis\n"
-            "- Slide 2: Problem / Current State\n"
-            "- Slide 3: Key Data & Findings\n"
-            "- Slide 4: Strategic Recommendations\n"
-            "- Slide 5: Next Steps & Timeline\n"
-            "- For each slide, include **[Slide Title]**, **[Key Bullets]**, and **[Speaker Notes]**.",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
-
-    OutputFormat.INFOGRAPHIC: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are a Lead Data Visualisation Designer.\n"
-            "Task: Create an Infographic Layout Brief.\n\n"
-            "Formatting Rules:\n"
-            "- Panel 1: Banner Hook & Headline Metric\n"
-            "- Panel 2: Key Problem Breakdown (visual charts suggested)\n"
-            "- Panel 3: 3 Metric Callouts\n"
-            "- Panel 4: Action Roadmap",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
-
-    OutputFormat.VIDEO_SCRIPT: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are a Video Producer.\n"
-            "Task: Write a 90-second video script.\n\n"
-            "Formatting Rules:\n"
-            "- Include timestamps (e.g., [0:00 - 0:15])\n"
-            "- Format each segment as: **[VISUAL]** and **[AUDIO/NARRATION]**.",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
-
-    OutputFormat.FAQ: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are a Corporate Communications Specialist.\n"
-            "Task: Draft a Frequently Asked Questions (FAQ) document.\n\n"
-            "Formatting Rules:\n"
-            "- 5 clear, high-priority questions starting with **Q:**\n"
-            "- Direct, concise answers starting with **A:**.",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
-
-    OutputFormat.TALKING_POINTS: ChatPromptTemplate.from_messages([
-        (
-            "system",
-            "You are a Press Secretary.\n"
-            "Task: Produce a Spokesperson Talking Points card.\n\n"
-            "Formatting Rules:\n"
-            "- Top 3 core messages to repeat\n"
-            "- Supporting facts & figures\n"
-            "- Tough questions & defensive answers (If asked X -> Say Y)",
-        ),
-        ("human", "Core Summary Input:\n{summary}"),
-    ]),
 }
+
+
+INFOGRAPHIC_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are a visual communications strategist. Create a concise infographic plan designed for a business/technical audience.\n"
+        "Use only valid JSON and no markdown fences.\n"
+        "Return a JSON object matching this schema:\n"
+        "{{\n"
+        "  \"title\": \"Short main headline\",\n"
+        "  \"subtitle\": \"Short supporting sentence\",\n"
+        "  \"accent_color\": \"HEX color like #2563eb\",\n"
+        "  \"background_color\": \"HEX color like #f8fafc\",\n"
+        "  \"sections\": [\n"
+        "    {{\"title\": \"Key Finding\", \"text\": \"up to 2 sentences\"}},\n"
+        "    {{\"title\": \"Impact\", \"text\": \"up to 2 sentences\"}},\n"
+        "    {{\"title\": \"Action\", \"text\": \"up to 2 sentences\"}}\n"
+        "  ]\n"
+        "}}\n"
+        "Keep the tone clear, executive, and visual.",
+    ),
+    ("human", "Core Summary Input:\n{summary}"),
+])
 
 
 # ==========================================
 # 5. FastAPI Endpoint Logic
 # ==========================================
-@app.get("/")
-def health_check():
-    return {"status": "ok", "service": "Content Transformation Pipeline API (SIH 2026)"}
-
-
 @app.post("/transform", response_model=TransformationResponse)
 async def transform_document(
     format_type: OutputFormat = Form(..., description="Target output template"),
@@ -259,13 +290,14 @@ async def transform_document(
     pdf_file: Optional[UploadFile] = File(None, description="PDF File upload"),
 ):
     # Validate Input Source
-    if not raw_text and not pdf_file:
+    if not raw_text and pdf_file is None:
         raise HTTPException(status_code=400, detail="Provide either 'raw_text' or a 'pdf_file'.")
 
     # 1. Extraction Layer
     document_text = ""
-    if pdf_file:
-        if not pdf_file.filename.endswith(".pdf"):
+    if pdf_file is not None:
+        filename = getattr(pdf_file, "filename", None)
+        if not filename or not filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
         contents = await pdf_file.read()
         document_text = extract_text_from_pdf_bytes(contents)
@@ -276,30 +308,13 @@ async def transform_document(
         raise HTTPException(status_code=400, detail="Provided text is too short to process.")
 
     # 2. Step 1 Chain: Extract Core Knowledge
-    llm = get_llm()
-    extraction_chain = extraction_prompt | llm | json_parser
-
     try:
         extracted_summary: dict = await extraction_chain.ainvoke({
             "document_text": document_text,
             "format_instructions": json_parser.get_format_instructions(),
         })
     except Exception as e:
-        # Fallback if API key is invalid/unset during local development
-        extracted_summary = {
-            "core_thesis": "The document provides critical operational insights and recommendations based on recent data.",
-            "key_takeaways": [
-                "Primary system anomalous activity flagged and contained.",
-                "Service disruption risk identified during remediation windows.",
-                "Recommended credential separation across environments."
-            ],
-            "actionable_insights": [
-                "Enforce multi-factor authentication and secret separation.",
-                "Schedule maintenance during off-peak hours.",
-                "Pre-approve stakeholder communications."
-            ],
-            "target_audience": "Executive Leadership & Technical Stakeholders"
-        }
+        raise HTTPException(status_code=500, detail=f"Failed during knowledge extraction phase: {str(e)}")
 
     # 3. Step 2 Chain: Execute Format Transformation
     try:
@@ -310,18 +325,61 @@ async def transform_document(
             "summary": str(extracted_summary)
         })
     except Exception as e:
-        transformed_output = (
-            f"**{format_type.value.upper().replace('_', ' ')}**\n\n"
-            f"**Core Thesis:** {extracted_summary['core_thesis']}\n\n"
-            "**Key Findings:**\n" + "\n".join(f"• {t}" for t in extracted_summary['key_takeaways']) + "\n\n"
-            "**Actionable Next Steps:**\n" + "\n".join(f"1. {a}" for a in extracted_summary['actionable_insights'])
-        )
+        raise HTTPException(status_code=500, detail=f"Failed during format transformation phase: {str(e)}")
 
     # 4. Return Combined Output Response
     return TransformationResponse(
         format_type=format_type,
         core_summary=CoreSummary(**extracted_summary),
         transformed_content=transformed_output,
+    )
+
+
+@app.post("/generate-infographic")
+async def generate_infographic(
+    format_type: OutputFormat = Form(OutputFormat.ADVISORY, description="Target content tone for the infographic"),
+    raw_text: Optional[str] = Form(None, description="Direct string text input"),
+    pdf_file: Optional[UploadFile] = File(None, description="PDF File upload"),
+):
+    """Extract content from text/PDF, convert it into a compact infographic plan, and return the rendered PNG."""
+    if not raw_text and pdf_file is None:
+        raise HTTPException(status_code=400, detail="Provide either 'raw_text' or a 'pdf_file'.")
+
+    document_text = ""
+    if pdf_file is not None:
+        filename = getattr(pdf_file, "filename", None)
+        if not filename or not filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Uploaded file must be a PDF.")
+        contents = await pdf_file.read()
+        document_text = extract_text_from_pdf_bytes(contents)
+    elif raw_text:
+        document_text = raw_text
+
+    if len(document_text.strip()) < 50:
+        raise HTTPException(status_code=400, detail="Provided text is too short to process.")
+
+    try:
+        extracted_summary: dict = await extraction_chain.ainvoke({
+            "document_text": document_text,
+            "format_instructions": json_parser.get_format_instructions(),
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed during knowledge extraction phase: {str(e)}")
+
+    try:
+        infographic_chain = INFOGRAPHIC_PROMPT | llm | JsonOutputParser(pydantic_object=InfographicSpec)
+        spec_dict: dict = await infographic_chain.ainvoke({
+            "summary": str(extracted_summary),
+        })
+        infographic_spec = InfographicSpec(**spec_dict)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed during infographic generation: {str(e)}")
+
+    png_bytes = render_infographic(infographic_spec)
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Content-Disposition": 'inline; filename="infographic.png"'},
     )
 
 

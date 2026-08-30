@@ -317,6 +317,7 @@ export type Artifact = {
   formatFit: number;
   updated: string;
   body: string;
+  imageUrl?: string;
 };
 
 const execSummaryBody = `**Situation**

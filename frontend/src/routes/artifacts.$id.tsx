@@ -130,6 +130,16 @@ function ArtifactDetail() {
 
         <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
           <GlassCard className="p-5 sm:p-7">
+            {artifact.imageUrl ? (
+              <div className="mb-6 overflow-hidden rounded-2xl border border-border bg-surface">
+                <img
+                  src={artifact.imageUrl}
+                  alt={artifact.title}
+                  className="w-full object-cover"
+                />
+              </div>
+            ) : null}
+
             {editing ? (
               <Textarea
                 value={body}
